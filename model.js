@@ -568,13 +568,16 @@
         }
         slotIds.add(rawSlot.id);
         const primaryMissing = !libIds.has(rawSlot.segmentId);
-        const substituteValid = !!rawSlot.substituteId && libIds.has(rawSlot.substituteId);
+        const substituteCancelled = !!rawSlot.substituteCancelled;
+        // 取消替代后编号仅作历史记录，实际生效的是原片段，不视为可用替代候选
+        const substituteUsable = !!rawSlot.substituteId && !substituteCancelled && libIds.has(rawSlot.substituteId);
         if (primaryMissing) {
-          // 原片段已删：有合规替代引用时允许继续核对（原片悬空仅告警）；否则拒绝
-          if (substituteValid) {
+          // 原片段已删：只有"未取消且在库"的替代能让该位置继续核对；否则拒绝
+          if (substituteUsable) {
             push(warnings, `${sp}.segmentId`, `原片段「${rawSlot.segmentId}」已不在片段库，但已安排替代「${rawSlot.substituteId}」，该位置以替代继续。`);
           } else {
-            push(errors, `${sp}.segmentId`, `引用的原片段「${rawSlot.segmentId}」不在片段库中，且没有可用替代片段。`);
+            const reason = rawSlot.substituteId && substituteCancelled ? "（替代已取消）" : "";
+            push(errors, `${sp}.segmentId`, `引用的原片段「${rawSlot.segmentId}」不在片段库中，且没有可用替代片段${reason}。`);
           }
         }
         if (rawSlot.substituteId && !libIds.has(rawSlot.substituteId)) {
@@ -583,8 +586,8 @@
         slots.push({
           id: rawSlot.id,
           segmentId: rawSlot.segmentId,
-          substituteId: substituteValid ? rawSlot.substituteId : null,
-          substituteCancelled: !!rawSlot.substituteCancelled
+          substituteId: !!rawSlot.substituteId && libIds.has(rawSlot.substituteId) ? rawSlot.substituteId : null,
+          substituteCancelled
         });
       });
 
@@ -670,9 +673,12 @@
           const frozenIds = new Set(frozenLibrary.map((s) => s.id));
           const requiredIds = new Set();
           slots.forEach((s) => {
-            if (libIds.has(s.segmentId)) requiredIds.add(s.segmentId);
-            else if (s.substituteId) requiredIds.add(s.substituteId);
-            if (s.substituteId) requiredIds.add(s.substituteId);
+            // 生效片段：原片在库则算原片；只有原片缺失且替代未取消时才算替代
+            if (libIds.has(s.segmentId)) {
+              requiredIds.add(s.segmentId);
+            } else if (s.substituteId && !s.substituteCancelled) {
+              requiredIds.add(s.substituteId);
+            }
           });
           const missing = [...requiredIds].filter((id) => !frozenIds.has(id));
           if (missing.length) {
@@ -698,11 +704,14 @@
             const position = slotPosition.has(entry.slotId) ? `第${slotPosition.get(entry.slotId)}位` : "排片位置";
             if (!slot) return; // 引用不存在位置已在前面报错
             if (entry.source === "substitute") {
-              if (!slot.substituteId) {
+              if (!slot.substituteId || slot.substituteCancelled) {
+                const reason = slot.substituteId && slot.substituteCancelled
+                  ? `该位置的替代片段「${slot.substituteId}」已标记取消，实际生效的是原片段`
+                  : "该排片位置没有安排可用替代候选";
                 push(
                   errors,
                   `${op}.source`,
-                  `${position}（${entry.slotId}）的定版排练记录声明本次使用替代片段放映，但该排片位置没有安排可用替代候选，来源与实际生效片段不一致，拒绝导入。`
+                  `${position}（${entry.slotId}）的定版排练记录声明本次使用替代片段放映，但${reason}，来源与实际生效片段不一致，拒绝导入。`
                 );
               } else if (!frozenIds.has(slot.substituteId)) {
                 push(

@@ -433,6 +433,91 @@ test("导入：合法定版工程（替代来源 + 候选在快照中）通过",
   assert.equal(M.reelDuration(r.state.reels[0], r.state.library), 22);
 });
 
+test("导入：替代已取消（保留编号）时声明替代放映 -> 拒绝；声明原片则通过", () => {
+  const f1 = { id: "f1", code: "F-1", duration: 10, shift: "正常", damage: "完好", note: "", thumb: "" };
+  const f2 = { id: "f2", code: "F-2", duration: 11, shift: "正常", damage: "完好", note: "", thumb: "" };
+
+  // 取消替代后仍声明替代放映 -> 拒绝，指出位置与取消状态
+  const cancelledButSubSource = {
+    library: [f1, f2],
+    reels: [
+      {
+        id: "r1",
+        title: "定版卷",
+        status: "finalized",
+        finalizedAt: 1,
+        slots: [{ id: "s1", segmentId: "f1", substituteId: "f2", substituteCancelled: true }],
+        runOrder: [{ slotId: "s1", order: 1, source: "substitute", delay: 0, delayReason: "", replaceReason: "x" }],
+        frozenLibrary: [f1, f2]
+      }
+    ]
+  };
+  const r1 = M.validateProject(cancelledButSubSource);
+  assert.equal(r1.ok, false);
+  const err = r1.errors.find((e) => /已标记取消/.test(e.message));
+  assert.ok(err, JSON.stringify(r1.errors));
+  assert.match(err.message, /第1位/);
+  assert.match(err.message, /f2/);
+
+  // 取消替代、声明原片放映 -> 通过；冻结快照不要求 f2
+  const cancelledPrimarySource = {
+    library: [f1, f2],
+    reels: [
+      {
+        id: "r1",
+        title: "定版卷",
+        status: "finalized",
+        finalizedAt: 1,
+        slots: [{ id: "s1", segmentId: "f1", substituteId: "f2", substituteCancelled: true }],
+        runOrder: [{ slotId: "s1", order: 1, source: "primary", delay: 0, delayReason: "", replaceReason: "" }],
+        frozenLibrary: [f1]
+      }
+    ]
+  };
+  const r2 = M.validateProject(cancelledPrimarySource);
+  assert.equal(r2.ok, true, JSON.stringify(r2.errors));
+  // 生效片段为原片 f1（10s）
+  assert.equal(M.reelDuration(r2.state.reels[0], r2.state.library), 10);
+
+  // 取消替代且原片也缺失 -> 位置级错误
+  const cancelledAndPrimaryGone = {
+    library: [f2],
+    reels: [
+      {
+        id: "r1",
+        title: "卷",
+        slots: [{ id: "s1", segmentId: "gone", substituteId: "f2", substituteCancelled: true }],
+        runOrder: []
+      }
+    ]
+  };
+  const r3 = M.validateProject(cancelledAndPrimaryGone);
+  assert.equal(r3.ok, false);
+  assert.ok(r3.errors.some((e) => /没有可用替代片段（替代已取消）/.test(e.message)));
+});
+
+test("导入：合法定版工程（替代未取消 + 候选在快照中 + 替代来源）通过", () => {
+  const f1 = { id: "f1", code: "F-1", duration: 10, shift: "正常", damage: "完好", note: "", thumb: "" };
+  const f2 = { id: "f2", code: "F-2", duration: 11, shift: "正常", damage: "完好", note: "", thumb: "" };
+  const project = {
+    library: [f1, f2],
+    reels: [
+      {
+        id: "r1",
+        title: "定版卷",
+        status: "finalized",
+        finalizedAt: 1,
+        slots: [{ id: "s1", segmentId: "f1", substituteId: "f2", substituteCancelled: false }],
+        runOrder: [{ slotId: "s1", order: 1, source: "substitute", delay: 0, delayReason: "", replaceReason: "原因" }],
+        frozenLibrary: [f1, f2]
+      }
+    ]
+  };
+  const r = M.validateProject(project);
+  assert.equal(r.ok, true, JSON.stringify(r.errors));
+  assert.equal(M.reelDuration(r.state.reels[0], r.state.library), 11);
+});
+
 test("导出 -> 再导入往返：自己生成的定版工程（含替代来源）合法", () => {
   // 先在模型内完成"排片+挂替代+排练+定版"，再按 toProject 导出，校验导出结果可直接再导入
   const primary = seg("p1", { duration: 10, damage: "需跳过" });

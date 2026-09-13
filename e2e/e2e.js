@@ -652,6 +652,57 @@ async function run() {
       check("错误说清排片位置（第1位/位置 id）", rejectBody.includes("第1位") && rejectBody.includes("s1"));
       check("第四次拒绝导入后原数据仍不变", JSON.stringify((await activeReelEval(page)).state) === before);
 
+      // 8d-2 保留替代编号但已标记取消，却声明替代放映 -> 拒绝，指出取消状态与位置
+      const cancelledButSubSource = {
+        library: [seg("f1", 10), seg("f2", 11)],
+        reels: [
+          {
+            id: "r1",
+            title: "定版卷",
+            status: "finalized",
+            finalizedAt: 1,
+            slots: [{ id: "s1", segmentId: "f1", substituteId: "f2", substituteCancelled: true }],
+            runOrder: [{ slotId: "s1", order: 1, source: "substitute", delay: 0, delayReason: "", replaceReason: "原因" }],
+            frozenLibrary: [seg("f1", 10), seg("f2", 11)]
+          }
+        ]
+      };
+      const cancelBody = await importRejected(
+        cancelledButSubSource,
+        "取消替代后声明替代放映被拒绝",
+        "已标记取消"
+      );
+      check("取消错误说清排片位置（第1位/位置 id/片段）", cancelBody.includes("第1位") && cancelBody.includes("s1") && cancelBody.includes("f2"));
+      check("拒绝取消组合后原数据仍不变", JSON.stringify((await activeReelEval(page)).state) === before);
+
+      // 8d-3 取消替代但声明原片放映（与生效片段一致）、快照只冻结原片 -> 允许导入
+      const cancelledPrimarySource = {
+        library: [seg("f1", 10), seg("f2", 11)],
+        reels: [
+          {
+            id: "r1",
+            title: "取消替代定版卷",
+            status: "finalized",
+            finalizedAt: 1,
+            slots: [{ id: "s1", segmentId: "f1", substituteId: "f2", substituteCancelled: true }],
+            runOrder: [{ slotId: "s1", order: 1, source: "primary", delay: 0, delayReason: "", replaceReason: "" }],
+            frozenLibrary: [seg("f1", 10)]
+          }
+        ],
+        activeReelId: "r1"
+      };
+      await page.setInputFiles("#importFile", { name: "ok.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify(cancelledPrimarySource)) });
+      await page.waitForSelector("#importModal:not([hidden])");
+      check("取消替代且原片来源（与生效一致）导入成功", (await page.locator("#importModalTitle").innerText()).includes("导入成功"));
+      await page.click('#importModal [data-close-modal="importModal"]');
+      await page.waitForTimeout(80);
+      const cancelledImport = await activeReelEval(page);
+      check("导入后实际生效为原片 f1（10s）", cancelledImport.reel.status === "finalized" && (await page.locator("#reelMetrics").innerText()).includes("0:10"));
+      // 撤销导入，恢复 before，继续后续用例
+      await page.click("#undoBtn");
+      await page.waitForTimeout(80);
+      check("取消组合导入可撤销", JSON.stringify((await activeReelEval(page)).state) === before);
+
       // 8e 合法定版工程：含"替代来源"组合（s1 需跳过原片→替代 f2，s2 原片 f1），快照完整
       const goodFinal = {
         app: "film-rehearsal-stage",
