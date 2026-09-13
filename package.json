@@ -1,0 +1,16 @@
+{
+  "name": "film-rehearsal-stage",
+  "version": "2.0.0",
+  "description": "多卷联映排练台：共享片段库、替代片段约束核对、排练记录、分叉合并人工裁决、定版只读。",
+  "private": true,
+  "scripts": {
+    "test": "node --test test/",
+    "e2e": "node e2e/e2e.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "playwright": "^1.63.0"
+  }
+}

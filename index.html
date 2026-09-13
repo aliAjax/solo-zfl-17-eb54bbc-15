@@ -3,39 +3,53 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>胶片分镜条核对台</title>
+    <title>多卷联映排练台</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <main class="shell">
       <header class="hero">
         <div>
-          <p class="eyebrow">纸质放映胶片整理</p>
-          <h1>胶片分镜条核对台</h1>
+          <p class="eyebrow">纸质放映胶片整理 · 多卷联映</p>
+          <h1>多卷联映排练台</h1>
+          <p class="subtitle">共享片段库被各卷引用；修改库片段会同步所有引用卷并重算时长与风险。</p>
         </div>
         <div class="hero-stats">
           <div>
-            <span>总时长</span>
-            <strong id="totalDuration">0:00</strong>
+            <span>共享片段</span>
+            <strong id="libCount">0</strong>
           </div>
           <div>
-            <span>破损片段</span>
-            <strong id="damageCount">0</strong>
+            <span>胶片卷</span>
+            <strong id="reelCount">0</strong>
           </div>
           <div>
-            <span>片段数</span>
-            <strong id="segmentCount">0</strong>
+            <span>待处理阻断</span>
+            <strong id="blockerTotal" class="danger-num">0</strong>
+          </div>
+          <div>
+            <span>已定版卷</span>
+            <strong id="finalizedCount">0</strong>
           </div>
         </div>
       </header>
 
+      <section class="reel-bar">
+        <nav id="reelTabs" class="reel-tabs" aria-label="胶片卷切换"></nav>
+        <button id="addReelBtn" class="small">＋ 新建卷</button>
+        <span class="spacer"></span>
+        <span id="syncState" class="sync-state">同步中</span>
+        <button id="pauseSyncBtn" class="small" type="button">暂停同步（分叉排练）</button>
+        <button id="undoBtn" class="small" type="button" title="撤销">↶ 撤销</button>
+        <button id="redoBtn" class="small" type="button" title="重做">↷ 重做</button>
+        <button id="importBtn" class="small" type="button">导入工程</button>
+        <button id="exportBtn" class="small" type="button">导出工程</button>
+        <input id="importFile" type="file" accept="application/json,.json" hidden />
+      </section>
+
       <section class="toolbar">
         <label>
-          胶片卷
-          <input id="reelTitle" type="text" placeholder="例：春日试映A卷" />
-        </label>
-        <label>
-          颜色偏移
+          颜色偏移筛选
           <select id="colorFilter">
             <option value="all">全部</option>
             <option value="正常">正常</option>
@@ -47,70 +61,186 @@
         </label>
         <label>
           搜索
-          <input id="searchInput" type="search" placeholder="片段编号或备注" />
+          <input id="searchInput" type="search" placeholder="片段编号或备注（片段库与当前卷同时筛选）" />
         </label>
-        <button id="exportBtn">导出清单</button>
+        <span class="toolbar-hint" id="revisionHint"></span>
       </section>
 
       <section class="layout">
-        <aside class="panel">
-          <h2>录入片段</h2>
+        <aside class="panel library-panel">
+          <div class="panel-head">
+            <h2>共享片段库</h2>
+            <span id="libraryHint">修改会同步到引用它的卷</span>
+          </div>
           <form id="segmentForm" class="segment-form">
-            <label>
-              片段编号
-              <input id="codeInput" required placeholder="A-014" />
-            </label>
-            <label>
-              时长秒数
-              <input id="durationInput" required type="number" min="1" value="12" />
-            </label>
-            <label>
-              颜色偏移
-              <select id="shiftInput">
-                <option value="正常">正常</option>
-                <option value="偏红">偏红</option>
-                <option value="偏青">偏青</option>
-                <option value="偏黄">偏黄</option>
-                <option value="褪色">褪色</option>
-              </select>
-            </label>
-            <label>
-              破损情况
-              <select id="damageInput">
-                <option value="完好">完好</option>
-                <option value="轻微划痕">轻微划痕</option>
-                <option value="齿孔破损">齿孔破损</option>
-                <option value="接片松动">接片松动</option>
-                <option value="需跳过">需跳过</option>
-              </select>
-            </label>
+            <p class="form-title" id="segmentFormTitle">录入新片段</p>
+            <div class="form-grid">
+              <label>
+                片段编号
+                <input id="codeInput" required placeholder="A-014" />
+              </label>
+              <label>
+                时长秒数
+                <input id="durationInput" required type="number" min="1" value="12" />
+              </label>
+              <label>
+                颜色偏移
+                <select id="shiftInput">
+                  <option value="正常">正常</option>
+                  <option value="偏红">偏红</option>
+                  <option value="偏青">偏青</option>
+                  <option value="偏黄">偏黄</option>
+                  <option value="褪色">褪色</option>
+                </select>
+              </label>
+              <label>
+                破损情况
+                <select id="damageInput">
+                  <option value="完好">完好</option>
+                  <option value="轻微划痕">轻微划痕</option>
+                  <option value="齿孔破损">齿孔破损</option>
+                  <option value="接片松动">接片松动</option>
+                  <option value="需跳过">需跳过</option>
+                </select>
+              </label>
+            </div>
             <label>
               缩略图
               <input id="thumbInput" type="file" accept="image/*" />
             </label>
             <label>
               备注
-              <textarea id="noteInput" rows="4" placeholder="试映前要留意的画面、接片或声音点"></textarea>
+              <textarea id="noteInput" rows="2" placeholder="试映前要留意的画面、接片或声音点"></textarea>
             </label>
-            <button class="primary" type="submit">加入放映清单</button>
+            <div class="form-actions">
+              <button class="primary" type="submit" id="segmentSubmitBtn">加入片段库</button>
+              <button type="button" id="segmentCancelEditBtn" hidden>取消编辑</button>
+            </div>
           </form>
+          <div id="libraryList" class="library-list"></div>
         </aside>
 
-        <section class="panel list-panel">
+        <section class="panel reel-panel">
+          <div class="reel-head">
+            <input id="reelTitle" class="reel-title-input" type="text" placeholder="胶片卷标题" />
+            <span id="reelStatusBadge" class="status-badge draft">草稿</span>
+            <span class="spacer"></span>
+            <button id="exportTxtBtn" class="small" type="button">导出本卷清单</button>
+            <button id="unfinalizeBtn" class="small warning" type="button" hidden>退回草稿</button>
+            <button id="finalizeBtn" class="small danger" type="button">核对定版</button>
+            <button id="deleteReelBtn" class="small ghost" type="button">删除本卷</button>
+          </div>
+
+          <div class="reel-metrics" id="reelMetrics"></div>
+
+          <div id="blockerBanner" class="blocker-banner" hidden></div>
+
+          <div class="add-slot-row" id="addSlotRow">
+            <label class="add-slot-select">
+              从片段库加入本卷
+              <select id="addSlotSelect"></select>
+            </label>
+            <button id="addSlotBtn" class="primary" type="button">加入放映顺序</button>
+          </div>
+
           <div class="panel-head">
-            <h2>放映顺序</h2>
-            <span>拖拽片段调整顺序</span>
+            <h2>放映顺序与排练记录</h2>
+            <span id="slotHint">拖拽调整计划顺序；逐位记录实际顺序、延误与替换原因</span>
           </div>
           <div id="segmentList" class="segment-list"></div>
         </section>
 
-        <aside class="panel warning-panel">
-          <h2>试映前核对</h2>
-          <div id="warningList" class="warning-list"></div>
+        <aside class="side-column">
+          <section class="panel warning-panel">
+            <h2>阻断与定版</h2>
+            <p class="panel-sub">未处理阻断存在时不能定版；冲突替代必须逐条说明。</p>
+            <div id="blockerList" class="blocker-list"></div>
+          </section>
+          <section class="panel warning-panel">
+            <h2>试映前核对</h2>
+            <div id="warningList" class="warning-list"></div>
+          </section>
         </aside>
       </section>
     </main>
 
+    <!-- 替代片段选择 -->
+    <div id="subModal" class="modal-backdrop" hidden>
+      <div class="modal modal-wide">
+        <div class="modal-head">
+          <h3 id="subModalTitle">安排替代片段</h3>
+          <button class="icon-btn" data-close-modal="subModal" type="button">×</button>
+        </div>
+        <p class="modal-sub" id="subModalDesc"></p>
+        <div id="subCandidateList" class="candidate-list"></div>
+        <div class="modal-actions">
+          <label class="force-line" id="forceLine" hidden>
+            <input type="checkbox" id="forceSubCheck" />
+            <span>我已知悉上述冲突，仍强制安排（该位置将保持阻断，直到换回合规片段或取消替代）</span>
+          </label>
+          <span class="spacer"></span>
+          <button data-close-modal="subModal" type="button">取消</button>
+          <button id="confirmSubBtn" class="primary" type="button" disabled>确认安排替代</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 合并冲突人工裁决 -->
+    <div id="mergeModal" class="modal-backdrop" hidden>
+      <div class="modal modal-wide">
+        <div class="modal-head">
+          <h3>两个页面分叉修改 — 需要人工裁决</h3>
+          <button class="icon-btn" id="mergeCloseBtn" type="button">×</button>
+        </div>
+        <p class="modal-sub" id="mergeIntro">
+          系统已自动合并不冲突的修改；以下条目两边改动互相矛盾，<strong>必须逐条选择，不能静默覆盖</strong>。
+        </p>
+        <div id="mergeStats" class="merge-stats"></div>
+        <div id="conflictList" class="conflict-list"></div>
+        <div class="modal-actions">
+          <button id="adoptRemoteBtn" class="ghost" type="button">放弃本页修改，采用对方版本</button>
+          <span class="spacer"></span>
+          <span id="mergeRemaining" class="merge-remaining"></span>
+          <button id="applyMergeBtn" class="primary" type="button" disabled>应用裁决结果</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 导入结果 -->
+    <div id="importModal" class="modal-backdrop" hidden>
+      <div class="modal modal-wide">
+        <div class="modal-head">
+          <h3 id="importModalTitle">导入结果</h3>
+          <button class="icon-btn" data-close-modal="importModal" type="button">×</button>
+        </div>
+        <div id="importResultBody"></div>
+        <div class="modal-actions">
+          <span class="spacer"></span>
+          <button class="primary" data-close-modal="importModal" type="button">知道了</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 通用确认 -->
+    <div id="confirmModal" class="modal-backdrop" hidden>
+      <div class="modal">
+        <div class="modal-head">
+          <h3 id="confirmTitle">确认操作</h3>
+        </div>
+        <p id="confirmMessage" class="modal-sub"></p>
+        <div class="modal-actions">
+          <span class="spacer"></span>
+          <button data-close-modal="confirmModal" type="button">取消</button>
+          <button id="confirmOkBtn" class="danger" type="button">确认</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="toastHost" class="toast-host"></div>
+
+    <script src="model.js"></script>
+    <script src="merge.js"></script>
+    <script src="store.js"></script>
     <script src="app.js"></script>
   </body>
 </html>
