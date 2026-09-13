@@ -687,6 +687,38 @@
               push(errors, `${path}.frozenLibrary[${i}].duration`, "冻结快照中存在非正时长片段。");
             }
           });
+
+          // 定版排练记录的"实际放映来源"必须与该位置实际可用片段一致，
+          // 否则导入后来源显示与实际生效片段不符（例如声明替代放映却没有替代候选）
+          const slotById = new Map(slots.map((s) => [s.id, s]));
+          const slotPosition = new Map(slots.map((s, i) => [s.id, i + 1]));
+          runOrder.forEach((entry, i) => {
+            const slot = slotById.get(entry.slotId);
+            const op = `${path}.runOrder[${i}]`;
+            const position = slotPosition.has(entry.slotId) ? `第${slotPosition.get(entry.slotId)}位` : "排片位置";
+            if (!slot) return; // 引用不存在位置已在前面报错
+            if (entry.source === "substitute") {
+              if (!slot.substituteId) {
+                push(
+                  errors,
+                  `${op}.source`,
+                  `${position}（${entry.slotId}）的定版排练记录声明本次使用替代片段放映，但该排片位置没有安排可用替代候选，来源与实际生效片段不一致，拒绝导入。`
+                );
+              } else if (!frozenIds.has(slot.substituteId)) {
+                push(
+                  errors,
+                  `${op}.source`,
+                  `${position}（${entry.slotId}）的定版排练记录声明使用替代片段「${slot.substituteId}」，但该片段不在定版冻结快照中，拒绝导入。`
+                );
+              }
+            } else if (entry.source === "primary" && !libIds.has(slot.segmentId)) {
+              push(
+                errors,
+                `${op}.source`,
+                `${position}（${entry.slotId}）的定版排练记录声明使用原片段放映，但原片段「${slot.segmentId}」已不在片段库中，应以替代来源记录，拒绝导入。`
+              );
+            }
+          });
         }
       }
       reels.push({

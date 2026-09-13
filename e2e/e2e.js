@@ -577,6 +577,7 @@ async function run() {
         check(name, (body.includes("导入被拒绝") || body.includes("错误")) && body.includes(expectedFragment), body.replace(/\n/g, " ").slice(0, 160));
         await page.click('#importModal [data-close-modal="importModal"]');
         await page.waitForTimeout(50);
+        return body;
       }
 
       // 8a 定版但没有 frozenLibrary
@@ -628,41 +629,78 @@ async function run() {
       );
       check("三次拒绝导入后原数据不变", JSON.stringify((await activeReelEval(page)).state) === before);
 
-      // 8d 合法定版工程（带完整快照）可导入，且之后改库不影响定版卷
+      // 8d 定版排练记录声明替代放映，但位置没有替代候选 -> 拒绝，错误说清位置
+      const substituteWithoutCandidate = {
+        library: [seg("f1", 10)],
+        reels: [
+          {
+            id: "r1",
+            title: "定版卷",
+            status: "finalized",
+            finalizedAt: 1,
+            slots: [{ id: "s1", segmentId: "f1", substituteId: null }],
+            runOrder: [{ slotId: "s1", order: 1, source: "substitute", delay: 0, delayReason: "", replaceReason: "原因" }],
+            frozenLibrary: [seg("f1", 10)]
+          }
+        ]
+      };
+      const rejectBody = await importRejected(
+        substituteWithoutCandidate,
+        "定版记录声明替代但无候选被拒绝",
+        "没有安排可用替代候选"
+      );
+      check("错误说清排片位置（第1位/位置 id）", rejectBody.includes("第1位") && rejectBody.includes("s1"));
+      check("第四次拒绝导入后原数据仍不变", JSON.stringify((await activeReelEval(page)).state) === before);
+
+      // 8e 合法定版工程：含"替代来源"组合（s1 需跳过原片→替代 f2，s2 原片 f1），快照完整
       const goodFinal = {
         app: "film-rehearsal-stage",
         schemaVersion: 2,
-        library: [seg("f1", 10), seg("f2", 15)],
+        library: [
+          { id: "f1", code: "F-1", duration: 10, shift: "正常", damage: "需跳过", note: "", thumb: "" },
+          seg("f2", 12)
+        ],
         reels: [
           {
             id: "r1",
             title: "定版导入卷",
             status: "finalized",
             finalizedAt: 123,
-            slots: [{ id: "s1", segmentId: "f1" }, { id: "s2", segmentId: "f2" }],
+            slots: [
+              { id: "s1", segmentId: "f1", substituteId: "f2", substituteCancelled: false },
+              { id: "s2", segmentId: "f2", substituteId: null, substituteCancelled: false }
+            ],
             runOrder: [
-              { slotId: "s1", order: 1, source: "primary", delay: 0, delayReason: "", replaceReason: "" },
+              { slotId: "s1", order: 1, source: "substitute", delay: 4, delayReason: "换机等待", replaceReason: "原片需跳过" },
               { slotId: "s2", order: 2, source: "primary", delay: 0, delayReason: "", replaceReason: "" }
             ],
-            frozenLibrary: [seg("f1", 10), seg("f2", 15)]
+            frozenLibrary: [
+              { id: "f1", code: "F-1", duration: 10, shift: "正常", damage: "需跳过", note: "", thumb: "" },
+              seg("f2", 12)
+            ]
           }
         ],
         activeReelId: "r1"
       };
       await page.setInputFiles("#importFile", { name: "good.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify(goodFinal)) });
       await page.waitForSelector("#importModal:not([hidden])");
-      check("完整快照定版工程导入成功", (await page.locator("#importModalTitle").innerText()).includes("导入成功"));
+      check("含替代来源的合法定版工程导入成功", (await page.locator("#importModalTitle").innerText()).includes("导入成功"));
       await page.click('#importModal [data-close-modal="importModal"]');
       await page.waitForTimeout(80);
+      const imported = await activeReelEval(page);
+      check("导入后来源与生效片段一致（s1 替代、s2 原片）", imported.reel.slots[0].substituteId === "f2" && imported.reel.runOrder[0].source === "substitute");
       const metricBefore = await page.locator("#reelMetrics").innerText();
-      check("导入定版卷时长为快照合计 0:25", metricBefore.includes("0:25"));
+      // s1 生效为替代 f2(12s) + s2 原片 f2(12s) = 24s
+      check("定版卷时长按实际生效片段合计 0:24", metricBefore.includes("0:24"), metricBefore.replace(/\n/g, " "));
+      const cardText = await page.locator(".segment-card").first().innerText();
+      check("卡片显示替代生效", cardText.includes("已安排替代") && cardText.includes("f2"));
       // 改库时长，定版卷应被冻结保护
-      await page.click('[data-lib-edit="f1"]');
+      await page.click('[data-lib-edit="f2"]');
       await page.fill("#durationInput", "99");
       await page.click("#segmentSubmitBtn");
       await page.waitForTimeout(120);
       const metricAfter = await page.locator("#reelMetrics").innerText();
-      check("库改动不影响已定版卷（快照冻结）", metricAfter.includes("0:25") && !metricAfter.includes("1:54"), metricAfter.replace(/\n/g, " "));
+      check("库改动不影响已定版卷（快照冻结）", metricAfter.includes("0:24") && !metricAfter.includes("3:18"), metricAfter.replace(/\n/g, " "));
       check("场景9 无 JS 错误", errors.length === 0, errors.join(" | "));
       await context.close();
     }
