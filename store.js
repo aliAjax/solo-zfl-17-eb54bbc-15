@@ -193,24 +193,23 @@
       return mergeAndWrite(normalized, meta, writeOpts);
     }
 
-    // 切换当前卷等纯界面状态：同版本号静默持久化（刷新可恢复），不入撤销栈，不造成分叉
+    // 切换当前卷：纯界面状态，不入撤销栈；但必须走分叉感知的合并，
+    // 否则另一页面已保存新版本时，这里会把内存里的旧状态整体写回、覆盖对方的片段与排练记录
     function setActiveReel(reelId) {
       if (!record.state.reels.some((r) => r.id === reelId)) return { status: "noop" };
-      record.state.activeReelId = reelId;
       if (paused) {
+        record.state.activeReelId = reelId;
         emit({ type: "active-reel" });
         return { status: "local" };
       }
-      const snapshot = shallowTrackedClone(record.state);
-      record.baseState = snapshot;
-      writeRaw({
-        state: snapshot,
-        revision: record.revision,
-        baseState: snapshot,
-        baseRevision: record.baseRevision
-      });
-      emit({ type: "active-reel" });
-      return { status: "applied" };
+      const desired = ensureStructure(shallowTrackedClone(record.state));
+      desired.activeReelId = reelId;
+      if (Merge.deepEqual(desired, record.state)) {
+        // 仅当远端也没有新版本时才是真正的 noop
+        const remote = readRaw();
+        if (!remote || remote.revision <= record.baseRevision) return { status: "noop" };
+      }
+      return mergeAndWrite(desired, { kind: "active-reel" }, { skipHistory: true });
     }
 
     // 恢复同步：把暂停期间的本地修改与远端分叉合并

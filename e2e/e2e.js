@@ -453,7 +453,221 @@ async function run() {
       await context.close();
     }
 
-    /* ============ 场景 6：原核对流程回归——筛选、提醒、导出、拖拽 ============ */
+    /* ============ 场景 6：切卷不能把旧版本写回覆盖其他页面的新保存 ============ */
+    {
+      const context = await freshContext(browser);
+      const pageA = await context.newPage();
+      const pageB = await context.newPage();
+      const errors = [];
+      pageA.on("pageerror", (e) => errors.push("A:" + e.message));
+      pageB.on("pageerror", (e) => errors.push("B:" + e.message));
+      await pageA.goto(BASE);
+      await pageB.goto(BASE);
+      await pageA.waitForSelector(".reel-tab");
+      await pageB.waitForSelector(".reel-tab");
+
+      // A 改片段并保存新版本
+      await pageA.click('[data-lib-edit="LIB-003"]');
+      await pageA.fill("#noteInput", "A刚保存的接片处理记录");
+      await pageA.fill("#durationInput", "16");
+      await pageA.click("#segmentSubmitBtn");
+      await pageA.waitForTimeout(150);
+
+      // B 停在旧版本（不触发任何提交），只是切换当前卷
+      await pageB.click('.reel-tab:has-text("B卷")');
+      await pageB.waitForTimeout(250);
+
+      const stored = await readState(pageB);
+      const seg = stored.state.library.find((s) => s.id === "LIB-003");
+      check("切卷后 A 刚保存的片段修改未被旧版本覆盖", seg.note === "A刚保存的接片处理记录" && seg.duration === 16);
+      const reels = stored.state.reels;
+      const reelB = reels.find((r) => r.title.includes("B卷"));
+      check("切卷同时把当前卷选择持久化", stored.state.activeReelId === reelB.id);
+      // B 界面也已合并到新版本
+      await pageB.click('[data-lib-edit="LIB-003"]').catch(() => {});
+      const bDuration = await pageB.inputValue("#durationInput");
+      check("切卷的页面内存也是新版本", bDuration === "16");
+      await pageB.keyboard.press("Escape");
+      check("场景7 无 JS 错误", errors.length === 0, errors.join(" | "));
+      await context.close();
+    }
+
+    /* ============ 场景 7：原片段已删除但有合规替代时可继续核对并定版 ============ */
+    {
+      const context = await freshContext(browser);
+      const page = await context.newPage();
+      const errors = [];
+      page.on("pageerror", (e) => errors.push(e.message));
+      await page.goto(BASE);
+      await page.waitForSelector(".reel-tab");
+      await clickReel(page, "B卷");
+      await page.waitForTimeout(60);
+
+      // 第 2 位 LIB-007(需跳过) 先挂合规替代 LIB-008
+      const cards = page.locator(".segment-card");
+      await cards.nth(1).locator('[data-sub]').click();
+      await page.waitForSelector("#subModal:not([hidden])");
+      await page.locator('.candidate-card:has-text("B-015")').click();
+      await page.click("#confirmSubBtn");
+      await page.waitForSelector("#subModal", { state: "hidden" });
+      await page.waitForTimeout(100);
+
+      // 从共享库删除原片段 LIB-007
+      page.on("dialog", (d) => d.accept());
+      await page.click('[data-lib-delete="LIB-007"]');
+      await page.waitForSelector("#confirmModal:not([hidden])");
+      await page.click("#confirmOkBtn");
+      await page.waitForTimeout(150);
+
+      const card2 = page.locator(".segment-card").nth(1);
+      const card2Text = await card2.innerText();
+      check("原片删除后该位置显示以替代继续", card2Text.includes("B-015"));
+      const blockersAfterDelete = await page.locator("#blockerList").innerText();
+      check("有合规替代时不再报引用缺失阻断", !blockersAfterDelete.includes("引用的共享片段已删除，且没有替代"));
+      check("仍提示未排练", blockersAfterDelete.includes("未排练") || blockersAfterDelete.includes("排练未记录"));
+
+      // 完成三位置排练：位1 原片、位2 必须替代+替换原因、位3 原片
+      // 每个 fill 后立即派发 change 并等待重绘，避免失焦触发上一字段 change 后 DOM 重建
+      const freshCards = page.locator(".segment-card");
+      async function setRun(cardIndex, field, value) {
+        const fieldLoc = freshCards.nth(cardIndex).locator(`[data-field="${field}"]`);
+        await fieldLoc.fill(String(value));
+        await fieldLoc.dispatchEvent("change");
+        await page.waitForTimeout(60);
+      }
+      await freshCards.nth(0).locator('[data-field="source"]').selectOption("primary");
+      await page.waitForTimeout(60);
+      await setRun(0, "order", 1);
+      // 位2 默认来源应已锁为替代
+      const src2 = await freshCards.nth(1).locator('[data-field="source"]').inputValue();
+      check("原片缺失位置实际放映锁定为替代", src2 === "substitute");
+      await setRun(1, "order", 2);
+      await setRun(1, "replaceReason", "原片已删除，以同批次备份替代");
+      await freshCards.nth(2).locator('[data-field="source"]').selectOption("primary");
+      await page.waitForTimeout(60);
+      await setRun(2, "order", 3);
+      await page.waitForTimeout(120);
+
+      const blockers = await page.locator("#blockerList").innerText();
+      check("补齐排练后无阻断（缺失原片+合规替代可定版）", blockers.includes("没有阻断") || blockers.includes("可以定版"), blockers.replace(/\n/g, " ").slice(0, 150));
+      await page.click("#finalizeBtn");
+      await page.waitForTimeout(150);
+      const cur = await activeReelEval(page);
+      check("含缺失原片的卷在合规替代下成功定版", cur.reel.status === "finalized" && cur.reel.frozenLibrary.map((s) => s.id).includes("LIB-008"));
+      check("定版快照不含已删除原片", !cur.reel.frozenLibrary.map((s) => s.id).includes("LIB-007"));
+      check("场景8 无 JS 错误", errors.length === 0, errors.join(" | "));
+      await context.close();
+    }
+
+    /* ============ 场景 8：定版冻结快照与重复排练记录的导入拦截 ============ */
+    {
+      const context = await freshContext(browser);
+      const page = await context.newPage();
+      const errors = [];
+      page.on("pageerror", (e) => errors.push(e.message));
+      await page.goto(BASE);
+      await page.waitForSelector(".reel-tab");
+      const before = JSON.stringify((await activeReelEval(page)).state);
+
+      const seg = (id, duration) => ({ id, code: id, duration, shift: "正常", damage: "完好", note: "", thumb: "" });
+      async function importRejected(project, name, expectedFragment) {
+        await page.setInputFiles("#importFile", { name: "p.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify(project)) });
+        await page.waitForSelector("#importModal:not([hidden])");
+        const body = await page.locator("#importResultBody").innerText();
+        check(name, (body.includes("导入被拒绝") || body.includes("错误")) && body.includes(expectedFragment), body.replace(/\n/g, " ").slice(0, 160));
+        await page.click('#importModal [data-close-modal="importModal"]');
+        await page.waitForTimeout(50);
+      }
+
+      // 8a 定版但没有 frozenLibrary
+      await importRejected(
+        {
+          library: [seg("f1", 10)],
+          reels: [{ id: "r1", title: "定版卷", status: "finalized", finalizedAt: 1, slots: [{ id: "s1", segmentId: "f1" }], runOrder: [] }]
+        },
+        "定版缺快照被拒绝",
+        "frozenLibrary"
+      );
+      // 8b 定版且有 frozenLibrary 但缺少被引用片段
+      await importRejected(
+        {
+          library: [seg("f1", 10), seg("f2", 12)],
+          reels: [
+            {
+              id: "r1",
+              title: "定版卷",
+              status: "finalized",
+              finalizedAt: 1,
+              slots: [{ id: "s1", segmentId: "f1" }, { id: "s2", segmentId: "f2" }],
+              runOrder: [],
+              frozenLibrary: [seg("f1", 10)]
+            }
+          ]
+        },
+        "定版快照不全被拒绝",
+        "冻结快照缺少"
+      );
+      // 8c 同一 slot 两条排练记录
+      await importRejected(
+        {
+          library: [seg("f1", 10)],
+          reels: [
+            {
+              id: "r1",
+              title: "卷",
+              slots: [{ id: "s1", segmentId: "f1" }],
+              runOrder: [
+                { slotId: "s1", order: 1, source: "primary", delay: 0, delayReason: "", replaceReason: "" },
+                { slotId: "s1", order: 2, source: "substitute", delay: 0, delayReason: "", replaceReason: "" }
+              ]
+            }
+          ]
+        },
+        "重复排练记录被拒绝",
+        "多条排练记录"
+      );
+      check("三次拒绝导入后原数据不变", JSON.stringify((await activeReelEval(page)).state) === before);
+
+      // 8d 合法定版工程（带完整快照）可导入，且之后改库不影响定版卷
+      const goodFinal = {
+        app: "film-rehearsal-stage",
+        schemaVersion: 2,
+        library: [seg("f1", 10), seg("f2", 15)],
+        reels: [
+          {
+            id: "r1",
+            title: "定版导入卷",
+            status: "finalized",
+            finalizedAt: 123,
+            slots: [{ id: "s1", segmentId: "f1" }, { id: "s2", segmentId: "f2" }],
+            runOrder: [
+              { slotId: "s1", order: 1, source: "primary", delay: 0, delayReason: "", replaceReason: "" },
+              { slotId: "s2", order: 2, source: "primary", delay: 0, delayReason: "", replaceReason: "" }
+            ],
+            frozenLibrary: [seg("f1", 10), seg("f2", 15)]
+          }
+        ],
+        activeReelId: "r1"
+      };
+      await page.setInputFiles("#importFile", { name: "good.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify(goodFinal)) });
+      await page.waitForSelector("#importModal:not([hidden])");
+      check("完整快照定版工程导入成功", (await page.locator("#importModalTitle").innerText()).includes("导入成功"));
+      await page.click('#importModal [data-close-modal="importModal"]');
+      await page.waitForTimeout(80);
+      const metricBefore = await page.locator("#reelMetrics").innerText();
+      check("导入定版卷时长为快照合计 0:25", metricBefore.includes("0:25"));
+      // 改库时长，定版卷应被冻结保护
+      await page.click('[data-lib-edit="f1"]');
+      await page.fill("#durationInput", "99");
+      await page.click("#segmentSubmitBtn");
+      await page.waitForTimeout(120);
+      const metricAfter = await page.locator("#reelMetrics").innerText();
+      check("库改动不影响已定版卷（快照冻结）", metricAfter.includes("0:25") && !metricAfter.includes("1:54"), metricAfter.replace(/\n/g, " "));
+      check("场景9 无 JS 错误", errors.length === 0, errors.join(" | "));
+      await context.close();
+    }
+
+    /* ============ 场景 9：原核对流程回归——筛选、提醒、导出、拖拽 ============ */
     {
       const context = await freshContext(browser);
       const page = await context.newPage();

@@ -346,6 +346,7 @@
              </div>`;
 
         const sourceVal = entry ? entry.source : substitute ? "substitute" : "primary";
+        const primaryOptionDisabled = !primary ? "disabled" : "";
         const rehearsal = `
           <div class="rehearsal-box ${entry ? "" : "unrecorded"}">
             <label>实际顺序
@@ -353,7 +354,7 @@
             </label>
             <label>实际放映
               <select data-run="${slot.id}" data-field="source" ${disabled}>
-                <option value="primary" ${sourceVal === "primary" ? "selected" : ""}>原片段${primary ? "·" + escapeHtml(primary.code) : ""}</option>
+                <option value="primary" ${sourceVal === "primary" ? "selected" : ""} ${primaryOptionDisabled}>原片段${primary ? "·" + escapeHtml(primary.code) : "（已删除，不可用）"}</option>
                 <option value="substitute" ${sourceVal === "substitute" ? "selected" : ""} ${substitute ? "" : "disabled"}>替代${substitute ? "·" + escapeHtml(substitute.code) : ""}</option>
               </select>
             </label>
@@ -429,7 +430,8 @@
         rehearsal: "未排练",
         reason: "缺替换原因",
         "delay-reason": "缺延误原因",
-        stale: "记录失效"
+        stale: "记录失效",
+        source: "来源矛盾"
       }[kind] || "阻断"
     );
   }
@@ -545,7 +547,12 @@
     const tab = event.target.closest("[data-reel-id]");
     if (!tab) return;
     activeId = tab.dataset.reelId;
-    store.setActiveReel(activeId);
+    const result = store.setActiveReel(activeId);
+    if (result && result.status === "conflict") {
+      openMerge({ ...result, kind: "commit" });
+    } else if (result && result.autoMerged) {
+      toast("切换时发现另一页面的新版本，已自动合并，对方修改未丢失。", "success");
+    }
     renderAll();
   });
 
@@ -628,7 +635,10 @@
       let entry = r.runOrder.find((e) => e.slotId === slotId);
       if (!entry) {
         const planIndex = r.slots.findIndex((s) => s.id === slotId);
-        entry = { slotId, order: planIndex + 1, source: "primary", delay: 0, delayReason: "", replaceReason: "" };
+        const slot = r.slots[planIndex];
+        // 默认来源与表单展示一致：已安排（未取消）替代时默认替代，否则原片
+        const defaultSource = slot && slot.substituteId && !slot.substituteCancelled ? "substitute" : "primary";
+        entry = { slotId, order: planIndex + 1, source: defaultSource, delay: 0, delayReason: "", replaceReason: "" };
         r.runOrder.push(entry);
       }
       if (field === "order") entry.order = Math.max(1, Number(raw) || entry.order);
@@ -678,19 +688,41 @@
   function openSubPicker(slotId) {
     const reel = activeReel();
     const row = M.reelSlotsWithSegments(reel, state().library).find((r) => r.slot.id === slotId);
-    if (!row || !row.primary) {
-      toast("原片段缺失，请先移除该位置后重新加入片段。", "error");
+    if (!row) return;
+    if (!row.primary && row.substitute) {
+      toast("该位置原片段已删除，当前以替代继续；可先取消替代再重新安排。", "warn");
       return;
     }
-    subPicker = { slotId, candidateId: null, force: false };
-    const tolerance = M.durationTolerance(row.primary.duration);
-    els.subModalTitle.textContent = `为「${row.primary.code}」安排替代片段`;
-    els.subModalDesc.innerHTML = `约束：颜色必须一致（${escapeHtml(row.primary.shift)}）、破损不能更严重（当前 ${escapeHtml(row.primary.damage)}）、时长容差 ±${tolerance} 秒（${M.formatDuration(row.primary.duration)}）。不满足的候选会<strong>逐条列出冲突</strong>，强制安排将保持阻断直到处理。`;
-    const candidates = M.eligibleSubstitutes(row.primary, state().library);
-    els.subCandidateList.innerHTML = candidates
-      .map((c) => {
-        const bad = c.conflicts.length > 0;
-        return `
+    subPicker = { slotId, candidateId: null, force: false, missingPrimary: !row.primary };
+    if (!row.primary) {
+      // 原片段已删除：无法比对颜色/破损/时长约束，所有库片段均可作为继承替代，由用户自行核对
+      els.subModalTitle.textContent = `第 ${reel.slots.findIndex((s) => s.id === slotId) + 1} 位原片段已删除 — 安排替代继续核对`;
+      els.subModalDesc.innerHTML = `原片段不在片段库中，<strong>无法自动校验颜色、破损与时长约束</strong>，请自行挑选画面/时长合适的片段；该位置排练时必须实际使用替代并填写替换原因。`;
+      els.subCandidateList.innerHTML = state()
+        .library.filter((s) => s.id !== row.substitute?.id)
+        .map((c) => {
+          return `
+        <label class="candidate-card" data-candidate="${c.id}">
+          <div>
+            <div class="cand-head">
+              <strong>${escapeHtml(c.code)}</strong>
+              <span class="segment-meta">${M.formatDuration(c.duration)}｜${escapeHtml(c.shift)}｜${escapeHtml(c.damage)}</span>
+            </div>
+            <p class="cand-ok">原片段缺失，约束需人工核对。</p>
+          </div>
+          <input type="radio" name="subCandidate" value="${c.id}" />
+        </label>`;
+        })
+        .join("");
+    } else {
+      const tolerance = M.durationTolerance(row.primary.duration);
+      els.subModalTitle.textContent = `为「${row.primary.code}」安排替代片段`;
+      els.subModalDesc.innerHTML = `约束：颜色必须一致（${escapeHtml(row.primary.shift)}）、破损不能更严重（当前 ${escapeHtml(row.primary.damage)}）、时长容差 ±${tolerance} 秒（${M.formatDuration(row.primary.duration)}）。不满足的候选会<strong>逐条列出冲突</strong>，强制安排将保持阻断直到处理。`;
+      const candidates = M.eligibleSubstitutes(row.primary, state().library);
+      els.subCandidateList.innerHTML = candidates
+        .map((c) => {
+          const bad = c.conflicts.length > 0;
+          return `
         <label class="candidate-card ${bad ? "has-conflicts" : ""}" data-candidate="${c.segment.id}">
           <div>
             <div class="cand-head">
@@ -701,8 +733,9 @@
           </div>
           <input type="radio" name="subCandidate" value="${c.segment.id}" />
         </label>`;
-      })
-      .join("");
+        })
+        .join("");
+    }
     els.forceLine.hidden = true;
     els.forceSubCheck.checked = false;
     els.confirmSubBtn.disabled = true;
@@ -718,6 +751,15 @@
     const reel = activeReel();
     const row = M.reelSlotsWithSegments(reel, state().library).find((r) => r.slot.id === subPicker.slotId);
     const candidate = state().library.find((s) => s.id === id);
+    if (!row.primary) {
+      // 原片缺失：不自动校验约束，用户选择后即可确认
+      els.forceLine.hidden = true;
+      els.forceSubCheck.checked = false;
+      subPicker.force = false;
+      els.confirmSubBtn.disabled = false;
+      els.confirmSubBtn.textContent = "确认安排替代";
+      return;
+    }
     const conflicts = M.substitutionConflicts(row.primary, candidate);
     const bad = conflicts.length > 0;
     els.forceLine.hidden = !bad;
@@ -738,7 +780,7 @@
     const reel = activeReel();
     const row = M.reelSlotsWithSegments(reel, state().library).find((r) => r.slot.id === subPicker.slotId);
     const candidate = state().library.find((s) => s.id === subPicker.candidateId);
-    const conflicts = M.substitutionConflicts(row.primary, candidate);
+    const conflicts = row.primary ? M.substitutionConflicts(row.primary, candidate) : [];
     if (conflicts.length && !subPicker.force) {
       toast("该候选存在冲突，必须逐条知悉并勾选强制安排。", "error");
       return;
@@ -751,6 +793,8 @@
     els.subModal.hidden = true;
     if (conflicts.length) {
       toast(`已强制安排冲突替代，${conflicts.length} 项冲突保持阻断，定版前必须处理。`, "warn");
+    } else if (!row.primary) {
+      toast("替代已安排，该位置以替代继续，排练时须实际使用替代并填写替换原因。", "success");
     } else {
       toast("替代片段已安排，时长与风险已重算。", "success");
     }

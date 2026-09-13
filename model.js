@@ -167,12 +167,14 @@
   /**
    * 逐条列出卷当前未处理的阻断。
    * 处理方式：
-   *  - 引用缺失：挂合规替代，或移除该位置
-   *  - 替代冲突：取消替代（恢复原片），或换为合规片段
-   *  - 需跳过原片：挂合规替代并记录替换原因
-   *  - 排练未完成：所有位置都要有实际顺序记录
-   *  - 延误未说明：实际延误 > 0 的位置必须填写延误说明
-   *  - 替换原因缺失：使用替代的位置必须填写替换原因
+   *  - 原片段引用缺失：若已安排"合规替代"则该位置可继续核对（排练必须实际使用替代）；
+   *    没有替代时必须移除位置或安排替代。
+   *  - 替代冲突：取消替代，或换为满足颜色/破损/时长约束的片段。
+   *  - 需跳过原片：挂合规替代并记录替换原因。
+   *  - 排练未完成：所有位置都要有实际顺序记录。
+   *  - 原片缺失却排练为"原片"、合规替代却排练为"原片"以外的矛盾来源 -> 阻断。
+   *  - 延误未说明：实际延误 > 0 的位置必须填写延误说明。
+   *  - 替换原因缺失：使用替代的位置必须填写替换原因。
    */
   function reelBlockers(reel, library) {
     const blockers = [];
@@ -180,25 +182,32 @@
     const rows = reelSlotsWithSegments(reel, library);
     const orderMap = new Map();
     (reel.runOrder || []).forEach((entry) => {
-      if (entry && entry.slotId) orderMap.set(entry.slotId, entry);
+      if (entry && entry.slotId && !orderMap.has(entry.slotId)) orderMap.set(entry.slotId, entry);
     });
 
     rows.forEach((row, index) => {
       const pos = index + 1;
-      const label = row.primary ? `第${pos}位「${row.primary.code}」` : `第${pos}位（原片段缺失）`;
+      const label = row.primary
+        ? `第${pos}位「${row.primary.code}」`
+        : row.substitute
+          ? `第${pos}位（原片段已删除，以替代「${row.substitute.code}」继续）`
+          : `第${pos}位（原片段缺失）`;
 
+      // 替代合规性：原片在场时按三条约束核对；原片缺失时替代本身是唯一可用内容，
+      // 其颜色/破损/时长已在安排时由用户确认，不再以缺失原片比对
+      let subConflicts = [];
       if (!row.primary) {
-        blockers.push({
-          key: `${row.slot.id}:missing`,
-          severity: "block",
-          kind: "missing",
-          message: `${label}：引用的共享片段已不存在，需移除该位置或安排替代。`
-        });
-      }
-
-      if (row.substitute) {
-        const conflicts = substitutionConflicts(row.primary, row.substitute);
-        conflicts.forEach((conflict, i) => {
+        if (!row.substitute) {
+          blockers.push({
+            key: `${row.slot.id}:missing`,
+            severity: "block",
+            kind: "missing",
+            message: `第${pos}位：引用的共享片段已删除，且没有替代片段，需移除该位置或安排替代。`
+          });
+        }
+      } else if (row.substitute) {
+        subConflicts = substitutionConflicts(row.primary, row.substitute);
+        subConflicts.forEach((conflict, i) => {
           blockers.push({
             key: `${row.slot.id}:conflict:${conflict.type}:${i}`,
             severity: "block",
@@ -206,7 +215,7 @@
             message: `${label} 的替代「${row.substitute.code}」不满足约束——${conflict.message}`
           });
         });
-      } else if (row.primary && row.primary.damage === "需跳过") {
+      } else if (row.primary.damage === "需跳过") {
         blockers.push({
           key: `${row.slot.id}:must-skip`,
           severity: "block",
@@ -215,6 +224,7 @@
         });
       }
 
+      const substituteUsable = !!row.substitute && subConflicts.length === 0;
       const entry = orderMap.get(row.slot.id);
       if (!entry || !entry.source) {
         blockers.push({
@@ -225,13 +235,40 @@
         });
       } else {
         const usedSubstitute = entry.source === "substitute";
-        if (usedSubstitute && !(entry.replaceReason || "").trim()) {
+        // 原片缺失：只能实际使用替代
+        if (!row.primary && row.substitute && !usedSubstitute) {
           blockers.push({
-            key: `${row.slot.id}:reason`,
+            key: `${row.slot.id}:source-missing-primary`,
             severity: "block",
-            kind: "reason",
-            message: `${label}：实际放映使用了替代片段，但未记录替换原因。`
+            kind: "source",
+            message: `第${pos}位原片段已删除，排练实际放映必须选择替代「${row.substitute.code}」。`
           });
+        }
+        // 原片"需跳过"且已挂合规替代时，排练必须使用替代
+        if (row.primary && row.primary.damage === "需跳过" && substituteUsable && !usedSubstitute) {
+          blockers.push({
+            key: `${row.slot.id}:source-must-skip`,
+            severity: "block",
+            kind: "source",
+            message: `${label} 原片段需跳过，排练实际放映必须使用替代片段。`
+          });
+        }
+        if (usedSubstitute) {
+          if (!row.substitute) {
+            blockers.push({
+              key: `${row.slot.id}:source-no-substitute`,
+              severity: "block",
+              kind: "source",
+              message: `${label}：排练记录选择了"替代"放映，但该位置没有可用替代片段。`
+            });
+          } else if (!(entry.replaceReason || "").trim()) {
+            blockers.push({
+              key: `${row.slot.id}:reason`,
+              severity: "block",
+              kind: "reason",
+              message: `${label}：实际放映使用了替代片段，但未记录替换原因。`
+            });
+          }
         }
         const delay = Number(entry.delay) || 0;
         if (delay > 0 && !(entry.delayReason || "").trim()) {
@@ -241,9 +278,6 @@
             kind: "delay-reason",
             message: `${label}：延误 ${delay} 秒，但未记录延误原因。`
           });
-        }
-        if (row.primary && row.substitute && !usedSubstitute) {
-          // 安排了替代却实际放映原片：允许，但替代已"取消使用"时才无冲突；这里仅作提示
         }
       }
     });
@@ -315,15 +349,17 @@
     };
   }
 
-  // 定版：无阻断才允许，冻结当前引用到的全部库片段快照
+  // 定版：无阻断才允许，冻结当前实际生效（含原片已删时以替代继续）的库片段快照
   function finalizeReel(reel, library) {
     if (reel.status === "finalized") return { ok: false, reel, blockers: [] };
     const blockers = reelBlockers(reel, library);
     if (blockers.length) return { ok: false, reel, blockers };
     const referenced = new Set();
-    reel.slots.forEach((slot) => {
-      referenced.add(slot.segmentId);
-      if (slot.substituteId) referenced.add(slot.substituteId);
+    reelSlotsWithSegments(reel, library).forEach((row) => {
+      if (row.primary) referenced.add(row.primary.id);
+      if (row.substitute) referenced.add(row.substitute.id);
+      // 原片缺失但能定版时，生效片段即替代
+      if (!row.primary && row.effective) referenced.add(row.effective.id);
     });
     const snapshot = library.filter((segment) => referenced.has(segment.id)).map((segment) => JSON.parse(JSON.stringify(segment)));
     return {
@@ -531,8 +567,15 @@
           return;
         }
         slotIds.add(rawSlot.id);
-        if (!libIds.has(rawSlot.segmentId)) {
-          push(errors, `${sp}.segmentId`, `引用的片段「${rawSlot.segmentId}」不在片段库中。`);
+        const primaryMissing = !libIds.has(rawSlot.segmentId);
+        const substituteValid = !!rawSlot.substituteId && libIds.has(rawSlot.substituteId);
+        if (primaryMissing) {
+          // 原片段已删：有合规替代引用时允许继续核对（原片悬空仅告警）；否则拒绝
+          if (substituteValid) {
+            push(warnings, `${sp}.segmentId`, `原片段「${rawSlot.segmentId}」已不在片段库，但已安排替代「${rawSlot.substituteId}」，该位置以替代继续。`);
+          } else {
+            push(errors, `${sp}.segmentId`, `引用的原片段「${rawSlot.segmentId}」不在片段库中，且没有可用替代片段。`);
+          }
         }
         if (rawSlot.substituteId && !libIds.has(rawSlot.substituteId)) {
           push(warnings, `${sp}.substituteId`, `替代片段「${rawSlot.substituteId}」不在片段库中，已清除替代。`);
@@ -540,7 +583,7 @@
         slots.push({
           id: rawSlot.id,
           segmentId: rawSlot.segmentId,
-          substituteId: rawSlot.substituteId && libIds.has(rawSlot.substituteId) ? rawSlot.substituteId : null,
+          substituteId: substituteValid ? rawSlot.substituteId : null,
           substituteCancelled: !!rawSlot.substituteCancelled
         });
       });
@@ -549,32 +592,38 @@
       const runOrder = [];
       if (raw.runOrder != null) {
         if (!Array.isArray(raw.runOrder)) {
-          push(warnings, `${path}.runOrder`, "排练记录不是数组，已忽略。");
+          push(errors, `${path}.runOrder`, "排练记录不是数组。");
         } else {
           const seenOrders = new Set();
+          const seenSlots = new Set();
           raw.runOrder.forEach((entry, orderIndex) => {
             const op = `${path}.runOrder[${orderIndex}]`;
-            if (!entry || typeof entry !== "object") {
-              push(warnings, op, "排练记录条目不是对象，已忽略。");
+            if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+              push(errors, op, "排练记录条目不是对象。");
               return;
             }
             if (!slotIdSet.has(entry.slotId)) {
-              push(warnings, `${op}.slotId`, `排练记录引用了不存在的排片位置「${entry.slotId}」，已忽略。`);
+              push(errors, `${op}.slotId`, `排练记录引用了不存在的排片位置「${entry.slotId}」。`);
+              return;
+            }
+            if (seenSlots.has(entry.slotId)) {
+              push(errors, `${op}.slotId`, `排片位置「${entry.slotId}」存在多条排练记录，每个位置只能有一条实际放映记录。`);
               return;
             }
             const order = Number(entry.order);
             if (!Number.isFinite(order) || order < 0) {
-              push(warnings, `${op}.order`, "排练顺序号无效，已忽略该条记录。");
+              push(errors, `${op}.order`, "排练顺序号无效。");
               return;
             }
             if (seenOrders.has(order)) {
-              push(warnings, `${op}.order`, `排练顺序号 ${order} 重复，已忽略后续条目。`);
+              push(errors, `${op}.order`, `排练顺序号 ${order} 重复。`);
               return;
             }
             seenOrders.add(order);
+            seenSlots.add(entry.slotId);
             const source = entry.source === "substitute" ? "substitute" : entry.source === "primary" ? "primary" : null;
             if (!source) {
-              push(warnings, `${op}.source`, "实际放映来源不是 primary/substitute，已忽略该条记录。");
+              push(errors, `${op}.source`, "实际放映来源必须是 primary 或 substitute。");
               return;
             }
             runOrder.push({
@@ -594,24 +643,51 @@
       else if (raw.status && raw.status !== "draft") {
         push(warnings, `${path}.status`, `未知状态「${raw.status}」，已按草稿处理。`);
       }
+
+      // 定版卷必须带完整冻结快照：覆盖每个位置实际生效的片段（原片缺失时为替代）
       let frozenLibrary = null;
       if (Array.isArray(raw.frozenLibrary)) {
-        const frozenIds = new Set();
-        raw.slots.forEach((s) => {
-          frozenIds.add(s.segmentId);
-          if (s.substituteId) frozenIds.add(s.substituteId);
-        });
         frozenLibrary = raw.frozenLibrary
-          .filter((s) => s && typeof s === "object" && frozenIds.has(s.id))
+          .filter((s) => {
+            if (!s || typeof s !== "object" || typeof s.id !== "string") return false;
+            const duration = Number(s.duration);
+            return Number.isFinite(duration) && duration > 0;
+          })
           .map((s) => ({
             id: String(s.id),
             code: String(s.code || ""),
-            duration: Number(s.duration) || 0,
+            duration: Number(s.duration),
             shift: SHIFTS.includes(s.shift) ? s.shift : "正常",
             damage: DAMAGES.includes(s.damage) ? s.damage : "完好",
             note: typeof s.note === "string" ? s.note : "",
             thumb: typeof s.thumb === "string" ? s.thumb : ""
           }));
+      }
+      if (status === "finalized") {
+        if (!Array.isArray(raw.frozenLibrary)) {
+          push(errors, `${path}.frozenLibrary`, "定版工程缺少冻结片段快照 frozenLibrary，不能导入为已定版卷（片段库后续改动会篡改定版内容）。");
+        } else {
+          const frozenIds = new Set(frozenLibrary.map((s) => s.id));
+          const requiredIds = new Set();
+          slots.forEach((s) => {
+            if (libIds.has(s.segmentId)) requiredIds.add(s.segmentId);
+            else if (s.substituteId) requiredIds.add(s.substituteId);
+            if (s.substituteId) requiredIds.add(s.substituteId);
+          });
+          const missing = [...requiredIds].filter((id) => !frozenIds.has(id));
+          if (missing.length) {
+            push(errors, `${path}.frozenLibrary`, `定版冻结快照缺少 ${missing.length} 个被引用片段（${missing.join("、")}），拒绝导入。`);
+          }
+          // 快照中的片段本身也要合法
+          raw.frozenLibrary.forEach((s, i) => {
+            if (!s || typeof s !== "object" || typeof s.id !== "string") return;
+            if (!frozenIds.has(s.id)) return;
+            const duration = Number(s.duration);
+            if (!Number.isFinite(duration) || duration <= 0) {
+              push(errors, `${path}.frozenLibrary[${i}].duration`, "冻结快照中存在非正时长片段。");
+            }
+          });
+        }
       }
       reels.push({
         id: raw.id,

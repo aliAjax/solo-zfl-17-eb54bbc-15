@@ -177,6 +177,171 @@ test("提醒按卷输出颜色与破损项，替代生效时以替代内容提�
   assert.equal(warnings.length, 0);
 });
 
+test("原片段已删除但有替代时：可继续核对，排练必须用替代+原因", () => {
+  // 库里只剩替代片段，slot 引用的原片段已删除
+  const sub = seg("sub1", { duration: 12, shift: "正常", damage: "完好" });
+  const reel = M.createReel({
+    slots: [{ id: "sl1", segmentId: "gone", substituteId: "sub1", substituteCancelled: false }]
+  });
+
+  // 未排练：仍有阻断（未排练，而不是"引用缺失"）
+  const before = M.reelBlockers(reel, [sub]);
+  assert.equal(before.some((b) => b.kind === "missing"), false);
+  assert.ok(before.some((b) => b.kind === "rehearsal"));
+
+  // 排练为原片 -> 来源矛盾阻断
+  const wrong = M.createReel({
+    slots: reel.slots,
+    runOrder: [{ slotId: "sl1", order: 1, source: "primary", delay: 0, delayReason: "", replaceReason: "" }]
+  });
+  assert.ok(M.reelBlockers(wrong, [sub]).some((b) => b.kind === "source"));
+
+  // 排练为替代但无替换原因 -> reason 阻断
+  const noReason = M.createReel({
+    slots: reel.slots,
+    runOrder: [{ slotId: "sl1", order: 1, source: "substitute", delay: 0, delayReason: "", replaceReason: "" }]
+  });
+  assert.ok(M.reelBlockers(noReason, [sub]).some((b) => b.kind === "reason"));
+
+  // 全部正确 -> 无阻断，可以定版；冻结快照只含替代
+  const ready = M.createReel({
+    slots: reel.slots,
+    runOrder: [{ slotId: "sl1", order: 1, source: "substitute", delay: 0, delayReason: "", replaceReason: "原片已删除" }]
+  });
+  assert.equal(M.reelBlockers(ready, [sub]).length, 0);
+  const done = M.finalizeReel(ready, [sub]);
+  assert.equal(done.ok, true);
+  assert.deepEqual(done.reel.frozenLibrary.map((s) => s.id), ["sub1"]);
+  // 定版卷按替代时长计算，且库再变不影响
+  assert.equal(M.reelDuration(done.reel, []), 12);
+
+  // 原片删除且没有替代 -> 仍然阻断
+  const noSub = M.createReel({ slots: [{ id: "sl2", segmentId: "gone2", substituteId: null, substituteCancelled: false }] });
+  assert.ok(M.reelBlockers(noSub, [sub]).some((b) => b.kind === "missing"));
+});
+
+test("需跳过原片挂合规替代后，排练必须实际使用替代", () => {
+  const p = seg("p1", { damage: "需跳过", duration: 10 });
+  const s = seg("s1", { duration: 11, damage: "完好" });
+  const reel = M.createReel({
+    slots: [{ id: "sl1", segmentId: "p1", substituteId: "s1", substituteCancelled: false }],
+    runOrder: [{ slotId: "sl1", order: 1, source: "primary", delay: 0, delayReason: "", replaceReason: "" }]
+  });
+  assert.ok(M.reelBlockers(reel, [p, s]).some((b) => b.kind === "source"));
+  const fixed = M.createReel({
+    slots: reel.slots,
+    runOrder: [{ slotId: "sl1", order: 1, source: "substitute", delay: 0, delayReason: "", replaceReason: "跳过原片" }]
+  });
+  assert.equal(M.reelBlockers(fixed, [p, s]).length, 0);
+});
+
+test("导入：定版卷缺冻结快照 / 快照不全 -> 拒绝", () => {
+  const lib = [{ id: "a", code: "A", duration: 10, shift: "正常", damage: "完好", note: "", thumb: "" }];
+  const finalizedNoFrozen = {
+    library: lib,
+    reels: [
+      { id: "r1", title: "定版卷", status: "finalized", finalizedAt: 1, slots: [{ id: "s1", segmentId: "a" }], runOrder: [] }
+    ]
+  };
+  const r1 = M.validateProject(finalizedNoFrozen);
+  assert.equal(r1.ok, false);
+  assert.ok(r1.errors.some((e) => e.path.endsWith("frozenLibrary")));
+
+  const incompleteFrozen = {
+    library: lib,
+    reels: [
+      {
+        id: "r1",
+        title: "定版卷",
+        status: "finalized",
+        finalizedAt: 1,
+        slots: [{ id: "s1", segmentId: "a" }],
+        runOrder: [],
+        frozenLibrary: []
+      }
+    ]
+  };
+  const r2 = M.validateProject(incompleteFrozen);
+  assert.equal(r2.ok, false);
+  assert.ok(r2.errors.some((e) => /冻结快照缺少/.test(e.message)));
+
+  // 快照完整 -> 通过
+  const complete = {
+    library: lib,
+    reels: [
+      {
+        id: "r1",
+        title: "定版卷",
+        status: "finalized",
+        finalizedAt: 1,
+        slots: [{ id: "s1", segmentId: "a" }],
+        runOrder: [],
+        frozenLibrary: [lib[0]]
+      }
+    ]
+  };
+  const r3 = M.validateProject(complete);
+  assert.equal(r3.ok, true);
+  assert.equal(r3.state.reels[0].frozenLibrary.length, 1);
+});
+
+test("导入：同一排片位置多条排练记录 -> 拒绝；顺序号重复 -> 拒绝", () => {
+  const lib = [{ id: "a", code: "A", duration: 10, shift: "正常", damage: "完好", note: "", thumb: "" }];
+  const dup = {
+    library: lib,
+    reels: [
+      {
+        id: "r1",
+        title: "卷",
+        slots: [{ id: "s1", segmentId: "a" }],
+        runOrder: [
+          { slotId: "s1", order: 1, source: "primary", delay: 0, delayReason: "", replaceReason: "" },
+          { slotId: "s1", order: 2, source: "substitute", delay: 0, delayReason: "", replaceReason: "" }
+        ]
+      }
+    ]
+  };
+  const r1 = M.validateProject(dup);
+  assert.equal(r1.ok, false);
+  assert.ok(r1.errors.some((e) => /多条排练记录/.test(e.message)));
+
+  const dupOrder = {
+    library: lib,
+    reels: [
+      {
+        id: "r1",
+        title: "卷",
+        slots: [{ id: "s1", segmentId: "a" }, { id: "s2", segmentId: "a" }],
+        runOrder: [
+          { slotId: "s1", order: 1, source: "primary", delay: 0, delayReason: "", replaceReason: "" },
+          { slotId: "s2", order: 1, source: "primary", delay: 0, delayReason: "", replaceReason: "" }
+        ]
+      }
+    ]
+  };
+  const r2 = M.validateProject(dupOrder);
+  assert.equal(r2.ok, false);
+  assert.ok(r2.errors.some((e) => /顺序号 1 重复/.test(e.message)));
+});
+
+test("导入：原片段悬空但有库内替代 -> 允许（警告）并以替代继续", () => {
+  const sub = { id: "sub", code: "SUB", duration: 12, shift: "正常", damage: "完好", note: "", thumb: "" };
+  const r = M.validateProject({
+    library: [sub],
+    reels: [
+      {
+        id: "r1",
+        title: "卷",
+        slots: [{ id: "s1", segmentId: "gone-primary", substituteId: "sub", substituteCancelled: false }],
+        runOrder: [{ slotId: "s1", order: 1, source: "substitute", delay: 0, delayReason: "", replaceReason: "原片已删" }]
+      }
+    ]
+  });
+  assert.equal(r.ok, true);
+  assert.ok(r.warnings.some((w) => /以替代继续/.test(w.message)));
+  assert.equal(M.reelBlockers(r.state.reels[0], r.state.library).length, 0);
+});
+
 test("有阻断不能定版；定版后冻结库快照，共享库后续修改不影响定版卷", () => {
   const s1 = seg("s1", { duration: 10 });
   const blocked = M.createReel({ slots: [M.createSlot("s1")] });

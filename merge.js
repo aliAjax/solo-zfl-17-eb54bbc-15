@@ -75,6 +75,23 @@
   }
 
   function normalizeReel(reel) {
+    const normalizedRunOrder = (reel.runOrder || [])
+      .map((e, i) => ({
+        slotId: e.slotId,
+        order: Number.isFinite(Number(e.order)) ? Number(e.order) : i + 1,
+        source: e.source === "substitute" ? "substitute" : "primary",
+        delay: Math.max(0, Number(e.delay) || 0),
+        delayReason: e.delayReason || "",
+        replaceReason: e.replaceReason || ""
+      }))
+      .sort((a, b) => a.order - b.order);
+    // 防御性归一：同一排片位置只保留一条排练记录（顺序号最小者）
+    const seenSlots = new Set();
+    const dedupedRunOrder = normalizedRunOrder.filter((e) => {
+      if (seenSlots.has(e.slotId)) return false;
+      seenSlots.add(e.slotId);
+      return true;
+    });
     return {
       id: reel.id,
       title: reel.title || "未命名胶片卷",
@@ -86,16 +103,7 @@
         substituteId: s.substituteId || null,
         substituteCancelled: !!s.substituteCancelled
       })),
-      runOrder: (reel.runOrder || [])
-        .map((e, i) => ({
-          slotId: e.slotId,
-          order: Number.isFinite(Number(e.order)) ? Number(e.order) : i + 1,
-          source: e.source === "substitute" ? "substitute" : "primary",
-          delay: Math.max(0, Number(e.delay) || 0),
-          delayReason: e.delayReason || "",
-          replaceReason: e.replaceReason || ""
-        }))
-        .sort((a, b) => a.order - b.order),
+      runOrder: dedupedRunOrder,
       frozenLibrary: Array.isArray(reel.frozenLibrary) ? reel.frozenLibrary : null
     };
   }

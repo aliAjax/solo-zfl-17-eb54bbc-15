@@ -185,6 +185,38 @@ function storeResolve(store, pending, resolutions) {
   return store.resolveCommit(pending, resolutions);
 }
 
+test("切换胶片卷不会用旧内存状态覆盖另一页面已保存的新版本", () => {
+  const storage = memStorage();
+  const pageA = createStore({ storage });
+  const pageB = createStore({ storage });
+
+  // 页面 A 修改片段并保存
+  const aNext = JSON.parse(JSON.stringify(pageA.getState()));
+  aNext.library[0].note = "A的新排练备注";
+  aNext.library[0].duration = aNext.library[0].duration + 4;
+  assert.equal(pageA.commit(aNext).status, "applied");
+
+  // 页面 B 尚未收到 storage 事件（模拟标签页在后台），内存仍是旧版本；
+  // 此时 B 只是切换当前卷，绝不能把旧版本写回
+  const reels = pageB.getState().reels;
+  if (reels.length < 2) {
+    // 种子至少两卷；保险起见动态判断
+    assert.ok(reels.length >= 2, "种子数据需要至少两卷才能测试切卷");
+  }
+  const otherId = reels.find((r) => r.id !== pageB.getState().activeReelId).id;
+  const result = pageB.setActiveReel(otherId);
+  assert.equal(result.status, "applied");
+  assert.equal(result.autoMerged, true);
+
+  const stored = JSON.parse(storage.getItem("zfl17-film-rehearsal-stage"));
+  const seg = stored.state.library[0];
+  assert.equal(seg.note, "A的新排练备注");
+  assert.equal(seg.duration, aNext.library[0].duration);
+  assert.equal(stored.state.activeReelId, otherId);
+  // B 的内存也已被合并到新版本
+  assert.equal(pageB.getState().library[0].note, "A的新排练备注");
+});
+
 test("旧版数据自动迁移", () => {  const storage = memStorage();
   storage.setItem(
     "zfl17-film-strip-desk",
