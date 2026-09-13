@@ -698,6 +698,9 @@
           // 否则导入后来源显示与实际生效片段不符（例如声明替代放映却没有替代候选）
           const slotById = new Map(slots.map((s) => [s.id, s]));
           const slotPosition = new Map(slots.map((s, i) => [s.id, i + 1]));
+          // 定版内容以冻结快照为准，快照中没有再回退共享库
+          const contentById = new Map(library.map((s) => [s.id, s]));
+          const resolveSegment = (id) => frozenLibrary.find((s) => s.id === id) || contentById.get(id) || null;
           runOrder.forEach((entry, i) => {
             const slot = slotById.get(entry.slotId);
             const op = `${path}.runOrder[${i}]`;
@@ -720,12 +723,24 @@
                   `${position}（${entry.slotId}）的定版排练记录声明使用替代片段「${slot.substituteId}」，但该片段不在定版冻结快照中，拒绝导入。`
                 );
               }
-            } else if (entry.source === "primary" && !libIds.has(slot.segmentId)) {
-              push(
-                errors,
-                `${op}.source`,
-                `${position}（${entry.slotId}）的定版排练记录声明使用原片段放映，但原片段「${slot.segmentId}」已不在片段库中，应以替代来源记录，拒绝导入。`
-              );
+            } else if (entry.source === "primary") {
+              if (!libIds.has(slot.segmentId)) {
+                push(
+                  errors,
+                  `${op}.source`,
+                  `${position}（${entry.slotId}）的定版排练记录声明使用原片段放映，但原片段「${slot.segmentId}」已不在片段库中，应以替代来源记录，拒绝导入。`
+                );
+              } else {
+                // 与未定版阻断规则一致：原片段标记"需跳过"时，定版记录不能声明实际放映原片
+                const primary = resolveSegment(slot.segmentId);
+                if (primary && primary.damage === "需跳过") {
+                  push(
+                    errors,
+                    `${op}.source`,
+                    `${position}（${entry.slotId}）的原片段「${primary.code || slot.segmentId}」标记为「需跳过」，但定版排练记录声明实际放映原片，与未定版时的阻断规则不一致，拒绝导入（应安排合规替代并以替代来源记录）。`
+                  );
+                }
+              }
             }
           });
         }

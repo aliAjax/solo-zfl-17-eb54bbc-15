@@ -703,6 +703,31 @@ async function run() {
       await page.waitForTimeout(80);
       check("取消组合导入可撤销", JSON.stringify((await activeReelEval(page)).state) === before);
 
+      // 8d-4 原片段标记「需跳过」却声明原片放映 -> 拒绝（即使已挂合规替代），指出位置
+      const skipPrimarySource = {
+        library: [
+          { id: "f1", code: "F-1", duration: 10, shift: "正常", damage: "需跳过", note: "", thumb: "" },
+          seg("f2", 11)
+        ],
+        reels: [
+          {
+            id: "r1",
+            title: "定版卷",
+            status: "finalized",
+            finalizedAt: 1,
+            slots: [{ id: "s1", segmentId: "f1", substituteId: "f2", substituteCancelled: false }],
+            runOrder: [{ slotId: "s1", order: 1, source: "primary", delay: 0, delayReason: "", replaceReason: "" }],
+            frozenLibrary: [
+              { id: "f1", code: "F-1", duration: 10, shift: "正常", damage: "需跳过", note: "", thumb: "" },
+              seg("f2", 11)
+            ]
+          }
+        ]
+      };
+      const skipBody = await importRejected(skipPrimarySource, "需跳过原片声明原片放映被拒绝", "需跳过");
+      check("需跳过错误说清排片位置（第1位/s1/F-1）", skipBody.includes("第1位") && skipBody.includes("s1") && skipBody.includes("F-1"));
+      check("拒绝需跳过组合后原数据仍不变", JSON.stringify((await activeReelEval(page)).state) === before);
+
       // 8e 合法定版工程：含"替代来源"组合（s1 需跳过原片→替代 f2，s2 原片 f1），快照完整
       const goodFinal = {
         app: "film-rehearsal-stage",
@@ -740,6 +765,8 @@ async function run() {
       await page.waitForTimeout(80);
       const imported = await activeReelEval(page);
       check("导入后来源与生效片段一致（s1 替代、s2 原片）", imported.reel.slots[0].substituteId === "f2" && imported.reel.runOrder[0].source === "substitute");
+      check("合规替代组：s1 需跳过原片以替代 f2 生效", imported.reel.runOrder[0].source === "substitute" && imported.reel.runOrder[0].replaceReason === "原片需跳过");
+      check("普通原片组：s2 普通片段以原片 f2 生效", imported.reel.slots[1].segmentId === "f2" && imported.reel.runOrder[1].source === "primary");
       const metricBefore = await page.locator("#reelMetrics").innerText();
       // s1 生效为替代 f2(12s) + s2 原片 f2(12s) = 24s
       check("定版卷时长按实际生效片段合计 0:24", metricBefore.includes("0:24"), metricBefore.replace(/\n/g, " "));

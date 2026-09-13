@@ -518,6 +518,64 @@ test("导入：合法定版工程（替代未取消 + 候选在快照中 + 替�
   assert.equal(M.reelDuration(r.state.reels[0], r.state.library), 11);
 });
 
+test("导入：需跳过原片被声明为原片来源 -> 拒绝并指出位置", () => {
+  const skip = { id: "f1", code: "F-1", duration: 10, shift: "正常", damage: "需跳过", note: "", thumb: "" };
+  const sub = { id: "f2", code: "F-2", duration: 11, shift: "正常", damage: "完好", note: "", thumb: "" };
+
+  // 即使已安排合规替代，记录声明原片也必须拒绝
+  const project = {
+    library: [skip, sub],
+    reels: [
+      {
+        id: "r1",
+        title: "定版卷",
+        status: "finalized",
+        finalizedAt: 1,
+        slots: [{ id: "s1", segmentId: "f1", substituteId: "f2", substituteCancelled: false }],
+        runOrder: [{ slotId: "s1", order: 1, source: "primary", delay: 0, delayReason: "", replaceReason: "" }],
+        frozenLibrary: [skip, sub]
+      }
+    ]
+  };
+  const r = M.validateProject(project);
+  assert.equal(r.ok, false);
+  const err = r.errors.find((e) => /需跳过/.test(e.message));
+  assert.ok(err, JSON.stringify(r.errors));
+  assert.match(err.message, /第1位/);
+  assert.match(err.message, /s1/);
+  assert.match(err.message, /F-1/);
+});
+
+test("导入：需跳过原片 + 合规替代来源 -> 通过；普通原片 -> 通过", () => {
+  const skip = { id: "f1", code: "F-1", duration: 10, shift: "正常", damage: "需跳过", note: "", thumb: "" };
+  const sub = { id: "f2", code: "F-2", duration: 11, shift: "正常", damage: "完好", note: "", thumb: "" };
+  const normal = { id: "f3", code: "F-3", duration: 20, shift: "正常", damage: "完好", note: "", thumb: "" };
+  const project = {
+    library: [skip, sub, normal],
+    reels: [
+      {
+        id: "r1",
+        title: "定版卷",
+        status: "finalized",
+        finalizedAt: 1,
+        slots: [
+          { id: "s1", segmentId: "f1", substituteId: "f2", substituteCancelled: false },
+          { id: "s2", segmentId: "f3", substituteId: null, substituteCancelled: false }
+        ],
+        runOrder: [
+          { slotId: "s1", order: 1, source: "substitute", delay: 0, delayReason: "", replaceReason: "需跳过" },
+          { slotId: "s2", order: 2, source: "primary", delay: 0, delayReason: "", replaceReason: "" }
+        ],
+        frozenLibrary: [skip, sub, normal]
+      }
+    ]
+  };
+  const r = M.validateProject(project);
+  assert.equal(r.ok, true, JSON.stringify(r.errors));
+  // s1 生效为替代 f2(11) + s2 原片 f3(20) = 31
+  assert.equal(M.reelDuration(r.state.reels[0], r.state.library), 31);
+});
+
 test("导出 -> 再导入往返：自己生成的定版工程（含替代来源）合法", () => {
   // 先在模型内完成"排片+挂替代+排练+定版"，再按 toProject 导出，校验导出结果可直接再导入
   const primary = seg("p1", { duration: 10, damage: "需跳过" });
